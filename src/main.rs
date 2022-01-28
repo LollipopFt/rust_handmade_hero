@@ -1,10 +1,16 @@
 use windows::{
     Win32::{
-        UI::WindowsAndMessaging::*,
+        UI::{
+            Input::{
+                XboxController::*,
+                KeyboardAndMouse::*
+            },
+            WindowsAndMessaging::*
+        },
         Graphics::Gdi::*,
-        Foundation::{PSTR, HWND, WPARAM, LPARAM, LRESULT, RECT},
+        Foundation::{PSTR, HWND, WPARAM, LPARAM, LRESULT, RECT, ERROR_SUCCESS, HINSTANCE},
         System::{
-            LibraryLoader::GetModuleHandleA,
+            LibraryLoader::{GetModuleHandleA, GetProcAddress, LoadLibraryA},
             Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, PAGE_READWRITE}
         }
     }
@@ -50,6 +56,32 @@ struct WindowDimension {
     height: i32
 }
 
+type Xinputgetstate = extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
+extern "system" fn xinput_get_state_stub(_: u32, _: *mut XINPUT_STATE) -> u32 {
+    0
+}
+#[allow(non_upper_case_globals)]
+static mut XInputGetState: Xinputgetstate = xinput_get_state_stub;
+
+type Xinputsetstate = extern "system" fn(u32, *mut XINPUT_VIBRATION) -> u32;
+extern "system" fn xinput_set_state_stub(_: u32, _: *mut XINPUT_VIBRATION) -> u32 {
+    0
+}
+#[allow(non_upper_case_globals)]
+static mut XInputSetState: Xinputsetstate = xinput_set_state_stub;
+
+unsafe fn load_xinput() {
+    let xinput_library: HINSTANCE = LoadLibraryA(PSTR(b"xinput1_3.dll\0".as_ptr() as _));
+    if xinput_library != HINSTANCE(0) {
+        XInputGetState = std::mem::transmute(
+            GetProcAddress(xinput_library, PSTR(b"XInputGetState\0".as_ptr() as _))
+        );
+        XInputSetState = std::mem::transmute(
+            GetProcAddress(xinput_library, PSTR(b"XInputSetState\0".as_ptr() as _))
+        );
+    }
+}
+
 fn get_window_dimension(window: HWND) -> WindowDimension {
     let mut result = WindowDimension { width: 0, height: 0 };
     let mut client_rect: RECT = Default::default();
@@ -59,7 +91,7 @@ fn get_window_dimension(window: HWND) -> WindowDimension {
     result
 }
 
-fn render_weird_gradient(buffer: OffscreenBuffer, blue_offset: i32, green_offset: i32) {
+fn render_weird_gradient(buffer: &mut OffscreenBuffer, blue_offset: i32, green_offset: i32) {
 unsafe {
     let mut row = buffer.memory as *mut u8;
     for green in 0..buffer.height {
@@ -103,7 +135,7 @@ unsafe {
 }
 }
 
-fn display_buffer_in_window(device_context: HDC, window_width: i32, window_height: i32, buffer: &OffscreenBuffer) {
+fn display_buffer_in_window(buffer: &OffscreenBuffer, device_context: HDC, window_width: i32, window_height: i32) {
 unsafe {
     // TODO: aspect ratio correction
     StretchDIBits(
@@ -124,23 +156,53 @@ unsafe {
     match message {
         WM_SIZE => {
         },
-        WM_CLOSE => {
-            GLOBAL_RUNNING = false;
-        },
         WM_ACTIVATEAPP => {
             println!("WM_ACTIVATEAPP");
         },
-        WM_DESTROY => {
+        WM_CLOSE | WM_DESTROY => {
             GLOBAL_RUNNING = false;
         },
+        WM_SYSKEYDOWN | WM_SYSKEYUP | WM_KEYUP | WM_KEYDOWN => {
+            let vk_code = wparam;
+            let was_down: bool = lparam.0 & (1 << 30) != 0;
+            let is_down: bool = lparam.0 & (1 << 31) == 0;
+            if was_down != is_down {
+                match vk_code.0 as u8 as char {
+                    'W' => println!("W"),
+                    'A' => println!("A"),
+                    'S' => println!("S"),
+                    'D' => println!("D"),
+                    'Q' => println!("Q"),
+                    'E' => println!("E"),
+                    _ => match vk_code.0 as u16 {
+                        // WPARAM(VK_UP) => ,
+                        // WPARAM(VK_LEFT) => ,
+                        // WPARAM(VK_DOWN) => ,
+                        // WPARAM(VK_RIGHT) => ,
+                        VK_ESCAPE => {
+                            print!("ESCAPE: ");
+                            if is_down {
+                                print!("is_down ");
+                            }
+                            if was_down {
+                                print!("was_down");
+                            }
+                            println!();
+                        },
+                        VK_SPACE => println!("SPACE"),
+                        _ => {}
+                    }
+                }
+            }
+        }
         WM_PAINT => {
             let mut paint: PAINTSTRUCT = Default::default();
             let device_context: HDC = BeginPaint(window, &mut paint);
             let dimension: WindowDimension = get_window_dimension(window);
-            display_buffer_in_window(device_context, dimension.width, dimension.height, &GLOBAL_BACKBUFFER);
+            display_buffer_in_window(&GLOBAL_BACKBUFFER, device_context, dimension.width, dimension.height);
             EndPaint(window, &paint);
         },
-        _=> {
+        _ => {
             result = DefWindowProcA(window, message, wparam, lparam);
         }
     }
@@ -149,6 +211,9 @@ unsafe {
 }
 
 fn main() {
+
+    unsafe { load_xinput() };
+
     let window_class = WNDCLASSA {
         style: CS_HREDRAW|CS_VREDRAW,
         lpfnWndProc: Some(main_window_fallback),
@@ -180,7 +245,8 @@ unsafe {
         window_class.hInstance,
         std::ptr::null_mut()
     );
-    if window.0 > 0 {
+    if window.0 != 0 {
+        let device_context: HDC = GetDC(window);
         let mut x_offset = 0;
         let mut y_offset = 0;
         while GLOBAL_RUNNING {
@@ -192,14 +258,37 @@ unsafe {
                 TranslateMessage(&message);
                 DispatchMessageA(&message);
             }
-            render_weird_gradient(GLOBAL_BACKBUFFER, x_offset, y_offset);
-            let device_context: HDC = GetDC(window);
-            let dimension: WindowDimension = get_window_dimension(window);
-            display_buffer_in_window(device_context, dimension.width, dimension.height, &GLOBAL_BACKBUFFER);
-            ReleaseDC(window, device_context);
 
-            x_offset+=1;
-            y_offset+=2;
+            for controller_index in 0..XUSER_MAX_COUNT {
+                let mut controller_state: XINPUT_STATE = Default::default();
+                if XInputGetState(controller_index, &mut controller_state) == ERROR_SUCCESS {
+                    // NOTE: controller is plugged in
+                    let pad: &XINPUT_GAMEPAD = &controller_state.Gamepad;
+                    // let up = pad.wButtons & XINPUT_GAMEPAD_DPAD_UP as u16;
+                    // let down = pad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN as u16;
+                    // let left = pad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT as u16;
+                    // let right = pad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT as u16;
+                    // let start = pad.wButtons & XINPUT_GAMEPAD_START as u16;
+                    // let back = pad.wButtons & XINPUT_GAMEPAD_BACK as u16;
+                    // let left_shoulder = pad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER as u16;
+                    // let right_shoulder = pad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER as u16;
+                    // let a_button = pad.wButtons & XINPUT_GAMEPAD_A as u16;
+                    // let b_button = pad.wButtons & XINPUT_GAMEPAD_B as u16;
+                    // let x_button = pad.wButtons & XINPUT_GAMEPAD_X as u16;
+                    // let y_button = pad.wButtons & XINPUT_GAMEPAD_Y as u16;
+
+                    let stick_x = pad.sThumbLX;
+                    let stick_y = pad.sThumbLY;
+
+                    x_offset += stick_x as i32 >> 12;
+                    y_offset += stick_y as i32 >> 12;
+                } else {
+                    // NOTE: controller is not available
+                }
+            }
+            render_weird_gradient(&mut GLOBAL_BACKBUFFER, x_offset, y_offset);
+            let dimension: WindowDimension = get_window_dimension(window);
+            display_buffer_in_window(&GLOBAL_BACKBUFFER, device_context, dimension.width, dimension.height);
         }
     }
 }
