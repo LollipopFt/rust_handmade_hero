@@ -1,17 +1,27 @@
+use std::{
+    ptr::{null, null_mut},
+    mem::{transmute, size_of, MaybeUninit},
+    ffi::c_void
+};
+
 use windows::{
     Win32::{
+        Foundation::{PSTR, HWND, WPARAM, LPARAM, LRESULT, RECT, ERROR_SUCCESS, HINSTANCE},
+        Graphics::Gdi::*,
+        Media::Audio::{
+            WAVEFORMATEX, WAVE_FORMAT_PCM,
+            DirectSound::*
+        },
+        System::{
+            LibraryLoader::{GetModuleHandleA, GetProcAddress, LoadLibraryA},
+            Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE}
+        },
         UI::{
             Input::{
                 XboxController::*,
                 KeyboardAndMouse::*
             },
             WindowsAndMessaging::*
-        },
-        Graphics::Gdi::*,
-        Foundation::{PSTR, HWND, WPARAM, LPARAM, LRESULT, RECT, ERROR_SUCCESS, HINSTANCE},
-        System::{
-            LibraryLoader::{GetModuleHandleA, GetProcAddress, LoadLibraryA},
-            Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, PAGE_READWRITE}
         }
     }
 };
@@ -19,7 +29,7 @@ use windows::{
 #[derive(Clone, Copy)]
 struct OffscreenBuffer {
     info: BITMAPINFO,
-    memory: *mut std::ffi::c_void,
+    memory: *mut c_void,
     width: i32,
     height: i32,
     pitch: i32,
@@ -44,7 +54,7 @@ static mut GLOBAL_BACKBUFFER: OffscreenBuffer = OffscreenBuffer {
         },
     bmiColors: [RGBQUAD {rgbBlue: 0, rgbGreen: 0, rgbRed: 0, rgbReserved: 0}]
     },
-    memory: std::ptr::null_mut::<std::ffi::c_void>(),
+    memory: null_mut::<c_void>(),
     width: 0,
     height: 0,
     pitch: 0,
@@ -58,28 +68,79 @@ struct WindowDimension {
 
 type Xinputgetstate = extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
 extern "system" fn xinput_get_state_stub(_: u32, _: *mut XINPUT_STATE) -> u32 {
-    0
+    0x48F
 }
 #[allow(non_upper_case_globals)]
 static mut XInputGetState: Xinputgetstate = xinput_get_state_stub;
 
 type Xinputsetstate = extern "system" fn(u32, *mut XINPUT_VIBRATION) -> u32;
 extern "system" fn xinput_set_state_stub(_: u32, _: *mut XINPUT_VIBRATION) -> u32 {
-    0
+    0x48F
 }
 #[allow(non_upper_case_globals)]
 static mut XInputSetState: Xinputsetstate = xinput_set_state_stub;
 
-unsafe fn load_xinput() {
-    let xinput_library: HINSTANCE = LoadLibraryA(PSTR(b"xinput1_3.dll\0".as_ptr() as _));
+fn load_xinput() {
+unsafe {
+    let mut xinput_library = LoadLibraryA(PSTR(b"xinput1_4.dll\0".as_ptr() as _));
+    if xinput_library.is_invalid() {
+        xinput_library = LoadLibraryA(PSTR(b"xinput1_3.dll\0".as_ptr() as _));
+    }
+
     if xinput_library != HINSTANCE(0) {
-        XInputGetState = std::mem::transmute(
+        XInputGetState = transmute(
             GetProcAddress(xinput_library, PSTR(b"XInputGetState\0".as_ptr() as _))
         );
-        XInputSetState = std::mem::transmute(
+        XInputSetState = transmute(
             GetProcAddress(xinput_library, PSTR(b"XInputSetState\0".as_ptr() as _))
         );
     }
+}
+}
+
+fn init_dsound(window: HWND, samples_per_second: u32, buffer_size: u32) {
+unsafe {
+    // NOTE: get a DirectSound object - cooperative
+    let mut direct_sound = None;
+    if DirectSoundCreate(null(), &mut direct_sound, None) == Ok(()) {
+        let mut wave_format: WAVEFORMATEX = MaybeUninit::zeroed().assume_init();
+        wave_format.wFormatTag = WAVE_FORMAT_PCM as u16;
+        wave_format.nChannels = 2;
+        wave_format.nSamplesPerSec = samples_per_second;
+        wave_format.wBitsPerSample = 16;
+        wave_format.nBlockAlign = wave_format.nChannels*wave_format.wBitsPerSample/8;
+        wave_format.nAvgBytesPerSec = wave_format.nSamplesPerSec*wave_format.nBlockAlign as u32;
+
+        let direct_sound = direct_sound.unwrap();
+        if direct_sound.SetCooperativeLevel(window, DSSCL_PRIORITY) == Ok(()) {
+            let mut buffer_description: DSBUFFERDESC = MaybeUninit::zeroed().assume_init();
+            buffer_description.dwSize = size_of::<DSBUFFERDESC>() as u32;
+            buffer_description.dwFlags = DSBCAPS_PRIMARYBUFFER;
+
+            // NOTE: create a primary buffer
+            let mut primary_buffer = None;
+            if direct_sound.CreateSoundBuffer(&buffer_description, &mut primary_buffer, None) == Ok(()) {
+                let primary_buffer = primary_buffer.unwrap();
+                if primary_buffer.SetFormat(&wave_format) == Ok(()) {
+                    // NOTE: format has been set
+                    println!("primary buffer format set.");
+                } else {}
+
+            } else {}
+
+        } else {}
+
+        let mut buffer_description: DSBUFFERDESC = MaybeUninit::zeroed().assume_init();
+        buffer_description.dwSize = size_of::<DSBUFFERDESC>() as u32;
+        buffer_description.dwBufferBytes = buffer_size;
+        buffer_description.lpwfxFormat = &mut wave_format;
+        let mut secondary_buffer = None;
+        if direct_sound.CreateSoundBuffer(&buffer_description, &mut secondary_buffer, None) == Ok(()) {
+            println!("secondary buffer created successfully.");
+        } else {}
+
+    } else {}
+}
 }
 
 fn get_window_dimension(window: HWND) -> WindowDimension {
@@ -117,7 +178,7 @@ unsafe {
     buffer.height = height;
     buffer.bytes_per_pixel = 4;
 
-    buffer.info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    buffer.info.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
     buffer.info.bmiHeader.biWidth = buffer.width;
     buffer.info.bmiHeader.biHeight = -buffer.height;
     buffer.info.bmiHeader.biPlanes = 1;
@@ -126,9 +187,9 @@ unsafe {
 
     let bitmap_memory_size = buffer.width*buffer.height*buffer.bytes_per_pixel;
     buffer.memory = VirtualAlloc(
-        std::ptr::null::<std::ffi::c_void>(),
+        null::<c_void>(),
         bitmap_memory_size as usize,
-        MEM_COMMIT,
+        MEM_RESERVE|MEM_COMMIT,
         PAGE_READWRITE
     );
     buffer.pitch = width*buffer.bytes_per_pixel;
@@ -194,6 +255,10 @@ unsafe {
                     }
                 }
             }
+            let altkey_wasdown: bool = lparam.0 & (1 << 29) != 0;
+            if (vk_code.0 as u16 == VK_F4) && altkey_wasdown {
+                GLOBAL_RUNNING = false;
+            }
         }
         WM_PAINT => {
             let mut paint: PAINTSTRUCT = Default::default();
@@ -212,7 +277,7 @@ unsafe {
 
 fn main() {
 
-    unsafe { load_xinput() };
+    load_xinput();
 
     let window_class = WNDCLASSA {
         style: CS_HREDRAW|CS_VREDRAW,
@@ -243,12 +308,15 @@ unsafe {
         None,
         None,
         window_class.hInstance,
-        std::ptr::null_mut()
+        null_mut()
     );
     if window.0 != 0 {
         let device_context: HDC = GetDC(window);
         let mut x_offset = 0;
         let mut y_offset = 0;
+
+        init_dsound(window, 48000, (48000*size_of::<u16>()*2) as u32);
+
         while GLOBAL_RUNNING {
             let mut message = MSG::default();
             while PeekMessageA(&mut message, HWND(0), 0, 0, PM_REMOVE).into() {

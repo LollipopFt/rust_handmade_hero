@@ -9,14 +9,16 @@ edition = "2021"
 version = "*"
 features = [
     "alloc",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_Input_XboxController",
-    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_DirectSound",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
-    "Win32_Foundation",
-    "Win32_Graphics_Gdi"
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_XboxController",
+    "Win32_UI_WindowsAndMessaging"
 ]
 
 [profile.release]

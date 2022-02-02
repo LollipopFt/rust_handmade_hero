@@ -2,3 +2,5 @@
 Cargo.lock
 *.pdb
 *.exe
+**/.vscode
+*.sublime-workspace
